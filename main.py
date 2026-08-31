@@ -2,6 +2,20 @@ import math
 import requests
 from scipy.stats import poisson
 import time
+import os
+import threading
+from flask import Flask
+
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Bot is alive and running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+
 
 # ==========================================
 # 1. ΡΥΘΜΙΣΕΙΣ TELEGRAM BOT
@@ -166,4 +180,6 @@ def run_bot():
         time.sleep(180)
 
 if __name__ == "__main__":
+    # Ξεκινάει ο Flask server παράλληλα
+    threading.Thread(target=run_flask, daemon=True).start()
     run_bot()
