@@ -23,9 +23,10 @@ def run_flask():
 
 TELEGRAM_TOKEN = "8737186847:AAFNhoe3_dhZdig9IjjC3ttGa_yB44Eqdrg"
 TELEGRAM_CHAT_ID = "8819668615"
+sent_alerts = set() # Λίστα για να μην στέλνει διπλά alerts
 
 def send_telegram_alert(message):
-    if TELEGRAM_TOKEN == "ΕΔΩ_ΒΑΖΕΙΣ_ΤΟ_TOKEN_ΑΠΟ_BOTFATHER":
+    if not TELEGRAM_TOKEN:
         print("[!] Προειδοποίηση: Δεν έχεις βάλει το Telegram Token!")
         return
 
@@ -86,6 +87,7 @@ def fetch_live_matches():
 
 
 def analyze_matches():
+        global sent_alerts
         print("[*] Έλεγχος για ζωντανούς αγώνες και ευκαιρίες...")
         data = fetch_live_matches()
 
@@ -150,7 +152,7 @@ def analyze_matches():
                      current_home_goals=home_goals,
                     odds=live_next_goal_odds
                  )
-
+                bankroll = 100
                 if ev > 0.08 and home_xg >= 1.50:
                     recommended_stake = round(bankroll * kelly_pct, 2)
                     msg = (
@@ -162,10 +164,8 @@ def analyze_matches():
                      )
                     send_telegram_alert(msg)
                     sent_alerts.add(match_id)
-        else:
-            print("[-] Δεν βρέθηκαν ζωντανοί αγώνες αυτή τη στιγμή.")
 
-sent_alerts = set() # Λίστα για να μην στέλνει διπλά alerts
+
 
 def run_bot():
     print("[*] Το NextGoalBot ξεκίνησε και παρακολουθεί τους αγώνες...")
