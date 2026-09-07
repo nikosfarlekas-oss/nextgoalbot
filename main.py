@@ -91,7 +91,7 @@ def analyze_matches():
         print("[*] Έλεγχος για ζωντανούς αγώνες και ευκαιρίες...")
         data = fetch_live_matches()
 
-        print(f"[*] API Status: Found {len(data) if instance(data, list) else 0} live matches")
+        print(f"[*] API Status: Found {len(data) if isinstance(data, list) else 0} live matches", flush=True)
 
         if isinstance(data, list) and len(data) > 0:
             for match in data:
