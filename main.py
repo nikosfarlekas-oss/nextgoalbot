@@ -91,6 +91,8 @@ def analyze_matches():
         print("[*] Έλεγχος για ζωντανούς αγώνες και ευκαιρίες...")
         data = fetch_live_matches()
 
+        print(f"[*] API Status: Found {len(data) if instance(data, list) else 0} live matches")
+
         if isinstance(data, list) and len(data) > 0:
             for match in data:
                 match_id = match.get("id", match.get("title"))
@@ -150,10 +152,11 @@ def analyze_matches():
                      away_xg=away_xg,
                      minute=minute,
                      current_home_goals=home_goals,
-                    odds=live_next_goal_odds
+                     odds=live_next_goal_odds
                  )
                 bankroll = 100
-                if ev > 0.08 and home_xg >= 1.50:
+                total_xg = home_xg + away_xg
+                if ev > 0.035 and total_xg >= 1.20 and (50 <= minute <= 82):
                     recommended_stake = round(bankroll * kelly_pct, 2)
                     msg = (
                         f"🚨 **VALUE BET ALERT** 🚨\n\n"
@@ -169,7 +172,6 @@ def analyze_matches():
 
 def run_bot():
     print("[*] Το NextGoalBot ξεκίνησε και παρακολουθεί τους αγώνες...")
-    send_telegram_alert("Bot is alive")
 
     while True:
         try:
