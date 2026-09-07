@@ -169,6 +169,8 @@ def analyze_matches():
 
 def run_bot():
     print("[*] Το NextGoalBot ξεκίνησε και παρακολουθεί τους αγώνες...")
+    send_telegram_alert("Bot is alive")
+
     while True:
         try:
             # Εδώ καλείται η συνάρτηση ελέγχου
