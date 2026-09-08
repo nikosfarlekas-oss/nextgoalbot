@@ -74,15 +74,20 @@ def fetch_live_matches():
     headers = {
         "x-apisports-key": API_KEY,
     }
-
     try:
         response = requests.get(API_URL, headers=headers, timeout=10)
+
         if response.status_code == 200:
             data = response.json()
+            
+            print(f"[DEBUG] API Errors: {data.get('errors')}", flush=True)
+            print(f"[DEBUG] API Results: {data.get('results')}", flush=True)
+
             return data.get("response", [])
         else:
             print(f"[-] API Error Status: {response.status_code}")
             return []
+
     except Exception as e:
         print(f"[-] Σφάλμα API: {e}")
         return []
