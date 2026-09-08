@@ -5,6 +5,7 @@ import time
 import os
 import threading
 from flask import Flask
+from football_ou_bot import analyze_over_under
 
 app = Flask(__name__)
 @app.route('/')
@@ -31,9 +32,12 @@ def send_telegram_alert(message):
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    payload = {"chat_id": TELEGRAM_CHAT_ID,
+               "text": message,
+               "parse_mode": "Markdown"
+               }
     try:
-        requests.post(url, json=payload)
+        requests.post(url, json=payload, timeout=5)
         print("[+] Το alert στάλθηκε επιτυχώς στο Telegram!")
     except Exception as e:
         print(f"[-] Σφάλμα κατά τη αποστολή στο Telegram: {e}")
@@ -63,30 +67,29 @@ def calculate_poisson_ev(home_xg, away_xg, minute, current_home_goals, odds):
 # ==========================================
 # 3. ΕΛΕΓΧΟΣ LIVE ΑΓΩΝΩΝ (TEST RUN)
 # ==========================================
-API_KEY = "d0e4efba8fmsh3352e4aaa285454p156c58jsnf98469d47643"
-API_HOST = "free-livescore-api.p.rapidapi.com"
+API_KEY = "df23784baf42eb793ab87b1386b7f87b"
+API_URL = "https://v3.football.api-sports.io/fixtures?live=all"
 
 def fetch_live_matches():
-    url = "https://free-livescore-api.p.rapidapi.com/livescore-get-search"
-    querystring = {"sportname": "soccer", "search": "live"}
-
     headers = {
-        "x-rapidapi-key": API_KEY,
-        "x-rapidapi-host": API_HOST
+        "x-apisports-key": API_KEY,
     }
 
     try:
-        response = requests.get(url, headers=headers, params=querystring)
+        response = requests.get(API_URL, headers=headers, timeout=10)
         if response.status_code == 200:
-            return response.json()
-        return []
+            data = response.json()
+            return data.get("response", [])
+        else:
+            print(f"[-] API Error Status: {response.status_code}")
+            return []
     except Exception as e:
         print(f"[-] Σφάλμα API: {e}")
         return []
 
 
 
-def analyze_matches():
+def analyze_matches(live_matches):
         global sent_alerts
         print("[*] Έλεγχος για ζωντανούς αγώνες και ευκαιρίες...")
         data = fetch_live_matches()
@@ -171,17 +174,28 @@ def analyze_matches():
 
 
 def run_bot():
-    print("[*] Το NextGoalBot ξεκίνησε και παρακολουθεί τους αγώνες...")
+    print("[*] Το NextGoalBot ξεκίνησε και παρακολουθεί τους αγώνες...", flush=True)
 
     while True:
-        try:
-            # Εδώ καλείται η συνάρτηση ελέγχου
-            analyze_matches()
-        except Exception as e:
-            print(f"[-] Σφάλμα κατά τον έλεγχο: {e}")
+        print("[*] Fetching live matches...", flush=True)
+        live_matches = fetch_live_matches()
+        print(f"[+] Βρέθηκαν {len(live_matches)} ζωντανοί αγώνες.", flush=True)
 
-        # Περιμένει 180 δευτερόλεπτα πριν τον επόμενο έλεγχο
-        time.sleep(180)
+        if live_matches:
+            # 1. Εκτέλεση του Next Goal Bot
+            try:
+                analyze_matches(live_matches)
+            except Exception as e:
+                print(f"[-] Σφάλμα στο Next Goal Bot: {e}", flush=True)
+
+            # 2. Εκτέλεση του Over/Under Bot
+            try:
+                analyze_over_under(live_matches)
+            except Exception as e:
+                print(f"[-] Σφάλμα στο Over/Under Bot: {e}", flush=True)
+
+        # Περιμένει 270 δευτερόλεπτα πριν τον επόμενο έλεγχο
+        time.sleep(300)
 
 if __name__ == "__main__":
     # Ξεκινάει ο Flask server παράλληλα
