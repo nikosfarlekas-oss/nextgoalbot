@@ -67,7 +67,7 @@ def calculate_poisson_ev(home_xg, away_xg, minute, current_home_goals, odds):
 # ==========================================
 # 3. ΕΛΕΓΧΟΣ LIVE ΑΓΩΝΩΝ (TEST RUN)
 # ==========================================
-API_KEY = "1d603b2042b54e678deee240f4819860"
+API_KEY = os.getenv("API_KEY")
 API_URL = "https://v3.football.api-sports.io/fixtures?live=all"
 
 def fetch_live_matches():
@@ -199,8 +199,8 @@ def run_bot():
             except Exception as e:
                 print(f"[-] Σφάλμα στο Over/Under Bot: {e}", flush=True)
 
-        # Περιμένει 270 δευτερόλεπτα πριν τον επόμενο έλεγχο
-        time.sleep(300)
+        # Περιμένει 350 δευτερόλεπτα πριν τον επόμενο έλεγχο
+        time.sleep(350)
 
 if __name__ == "__main__":
     # Ξεκινάει ο Flask server παράλληλα
