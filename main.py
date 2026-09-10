@@ -68,24 +68,26 @@ def calculate_poisson_ev(home_xg, away_xg, minute, current_home_goals, odds):
 # 3. ΕΛΕΓΧΟΣ LIVE ΑΓΩΝΩΝ (TEST RUN)
 # ==========================================
 API_KEY = os.getenv("API_KEY")
-API_URL = "https://v3.football.api-sports.io/fixtures?live=all"
+API_URL = "https://api.football-data.org/v4/matches"
 
 def fetch_live_matches():
     headers = {
-        "x-apisports-key": API_KEY,
+        "X-Auth-Token": API_KEY,
     }
+    params = {
+        "status": "IN_PLAY"
+    }
+
     try:
-        response = requests.get(API_URL, headers=headers, timeout=10)
+        response = requests.get(API_URL, headers=headers, params=params)
+        data = response.json()
 
         if response.status_code == 200:
-            data = response.json()
-
-            print(f"[DEBUG] API Errors: {data.get('errors')}", flush=True)
-            print(f"[DEBUG] API Results: {data.get('results')}", flush=True)
-
-            return data.get("response", [])
+            matches = data.get("matches", [])
+            print(f"[+] Βρέθηκαν {len(matches)} ζωντανοί αγώνες.")
+            return matches
         else:
-            print(f"[-] API Error Status: {response.status_code}")
+            print(f"[!] Σφάλμα API ({response.status_code}): {data.get('message')}")
             return []
 
     except Exception as e:
