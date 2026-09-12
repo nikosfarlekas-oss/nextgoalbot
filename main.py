@@ -96,34 +96,28 @@ def fetch_live_matches():
 
 
 
+
 def analyze_matches(live_matches):
         global sent_alerts
         print("[*] Έλεγχος για ζωντανούς αγώνες και ευκαιρίες...")
-        data = fetch_live_matches()
 
-        print(f"[*] API Status: Found {len(data) if isinstance(data, list) else 0} live matches", flush=True)
-
-        if isinstance(data, list) and len(data) > 0:
-            for match in data:
-                match_id = match.get("id", match.get("title"))
-
+        if isinstance(live_matches, list) and len(live_matches) > 0:
+            for match in live_matches:
+                match_id = match.get("id")
                 if match_id in sent_alerts:
                     continue
 
-                match_name = match.get("title", "Unknown Match")
-                score = match.get("score", "0-0")
-                minute = int(match.get("minute", 30))
+                # Ονόματα ομάδων
+                home_name = match.get("homeTeam", {}).get("name", "Home")
+                away_name = match.get("awayTeam", {}).get("name", "Away")
+                match_name = f"{home_name} vs {away_name}"
 
-                # Διαχωρισμός σκορ
-                home_goals = 0
-                away_goals = 0
-                if "-" in score:
-                    try:
-                        parts = score.split("-")
-                        home_goals = int(parts[0].strip())
-                        away_goals = int(parts[1].strip())
-                    except:
-                        pass
+                # Σκορ από το νέο API
+                score_data = match.get("score", {}).get("fullTime", {})
+                minute = int(match.get("minute") or 50)
+                home_goals = score_data.get("home") if score_data.get("home") is not None else 0
+                away_goals = score_data.get("away") if score_data.get("away") is not None else 0
+                print(f"[DEBUG] Αναλύεται: {match_name} ({home_goals}-{away_goals}) - Min: {minute}", flush=True)
 
                 # Pre-match & Live Αποδόσεις
                 home_prematch_odds = float(match.get("home_prematch_odds", 1.50))
@@ -145,7 +139,7 @@ def analyze_matches(live_matches):
                     msg = (
                         f"🔥 **HOT RECOVERY BET ALERT** 🔥\n\n"
                         f"⚽ **Αγώνας:** {match_name}\n"
-                        f"📊 **Σκορ:** {score} ({minute}')\n"
+                        f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
                         f"⭐ **Pre-match Απόδοση:** {home_prematch_odds}\n"
                         f"💰 **Live Απόδοση (Next Goal):** {live_next_goal_odds} (Όριο: {min_required_odds})\n"
                         f"⚠️ **Το φαβορί δέχθηκε γκολ & η απόδοση έχει VALUE!**"
@@ -171,7 +165,7 @@ def analyze_matches(live_matches):
                     msg = (
                         f"🚨 **VALUE BET ALERT** 🚨\n\n"
                         f"⚽ **Αγώνας:** {match_name}\n"
-                        f"📊 **Σκορ:** {score} ({minute}')\n"
+                        f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
                         f"💡 **Expected Value (EV):** +{round(ev * 100, 1)}%\n"
                          f"💵 **Προτεινόμενο Ποντάρισμα:** {recommended_stake}€"
                      )
