@@ -6,6 +6,7 @@ import os
 import threading
 from flask import Flask
 from football_ou_bot import analyze_over_under
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 @app.route('/')
@@ -114,7 +115,21 @@ def analyze_matches(live_matches):
 
                 # Σκορ από το νέο API
                 score_data = match.get("score", {}).get("fullTime", {})
-                minute = int(match.get("minute") or 50)
+
+                # Υπολογισμός πραγματικού λεπτού βάσει utcDate
+                match_utc_str = match.get("utcDate")
+                if match_utc_str:
+                    start_time = datetime.fromisoformat(match_utc_str.replace("Z", "+00:00"))
+                    now = datetime.now(timezone.utc)
+                    elapsed_minutes = int((now - start_time).total_seconds() / 60)
+
+                    # Προσαρμογή για το ημίχρονο (αν πέρασαν πάνω από 45 λεπτά)
+                    if elapsed_minutes > 45:
+                        minute = min(elapsed_minutes - 15, 90)  # Αφαιρεί 15 min για το ημίχρονο
+                    else:
+                        minute = max(elapsed_minutes, 1)
+                else:
+                    minute = 50
                 home_goals = score_data.get("home") if score_data.get("home") is not None else 0
                 away_goals = score_data.get("away") if score_data.get("away") is not None else 0
                 print(f"[DEBUG] Αναλύεται: {match_name} ({home_goals}-{away_goals}) - Min: {minute}", flush=True)
