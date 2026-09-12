@@ -116,20 +116,26 @@ def analyze_matches(live_matches):
                 # Σκορ από το νέο API
                 score_data = match.get("score", {}).get("fullTime", {})
 
-                # Υπολογισμός πραγματικού λεπτού βάσει utcDate
+                # Υπολογισμός πραγματικού λεπτού βάσει utcDate & status
                 match_utc_str = match.get("utcDate")
-                if match_utc_str:
+                status = match.get("status")
+
+                if status == "PAUSED":
+                    minute = 45  # Ημίχρονο
+                elif match_utc_str and status == "IN_PLAY":
                     start_time = datetime.fromisoformat(match_utc_str.replace("Z", "+00:00"))
                     now = datetime.now(timezone.utc)
-                    elapsed_minutes = int((now - start_time).total_seconds() / 60)
+                    elapsed = int((now - start_time).total_seconds() / 60)
 
-                    # Προσαρμογή για το ημίχρονο (αν πέρασαν πάνω από 45 λεπτά)
-                    if elapsed_minutes > 45:
-                        minute = min(elapsed_minutes - 15, 90)  # Αφαιρεί 15 min για το ημίχρονο
+                    # 1ο ημίχρονο (έως 50' μαζί με καθυστερήσεις)
+                    if elapsed <= 50:
+                        minute = elapsed
+                    # 2ο ημίχρονο (αφαίρεση 15' διαλείμματος)
                     else:
-                        minute = max(elapsed_minutes, 1)
+                        minute = min(elapsed - 15, 90)
                 else:
                     minute = 50
+
                 home_goals = score_data.get("home") if score_data.get("home") is not None else 0
                 away_goals = score_data.get("away") if score_data.get("away") is not None else 0
                 print(f"[DEBUG] Αναλύεται: {match_name} ({home_goals}-{away_goals}) - Min: {minute}", flush=True)
