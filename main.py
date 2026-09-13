@@ -52,10 +52,10 @@ def send_telegram_alert(message):
 
 
 # ==========================================
-# 2. ΗΒΡΙΔΙΚΗ ΛΗΨΗ LIVE ODDS (THE ODDS API)
+# 2. ΗΒΡΙΔΙΚΗ ΛΗΨΗ LIVE ODDS (STRICT CURRENT OVER LINE)
 # ==========================================
-def get_live_odds_from_odds_api(home_team, away_team):
-    """Τραβάει τις πραγματικές αποδόσεις 1X2 και Over/Under με έξυπνη σύγκριση ονομάτων."""
+def get_live_odds_from_odds_api(home_team, away_team, current_total_goals=0):
+    """Τραβάει αποδόσεις 1X2 & το Over ΑΠΟΚΛΕΙΣΤΙΚΑ για το τρέχον όριο (π.χ. Over 0.5 στο 0-0)."""
     if not ODDS_API_KEY:
         return None
 
@@ -66,13 +66,11 @@ def get_live_odds_from_odds_api(home_team, away_team):
         if res.status_code == 200:
             events = res.json()
 
-            # Καθαρισμός ονομάτων για καλύτερο matching
             h_clean = home_team.lower().replace("fc", "").replace("stade", "").strip()
             a_clean = away_team.lower().replace("fc", "").replace("stade", "").strip()
 
             for event in events:
                 event_h = event.get("home_team", "").lower()
-                event_a = event.get("away_team", "").lower()
 
                 h_words = [w for w in h_clean.split() if len(w) > 3]
                 match_found = any(w in event_h for w in h_words) if h_words else (h_clean in event_h)
@@ -83,7 +81,10 @@ def get_live_odds_from_odds_api(home_team, away_team):
                         markets = bookmakers[0].get("markets", [])
                         home_win_odd = None
                         away_win_odd = None
-                        live_over_odd = None
+                        target_over_odd = None
+
+                        # Υπολογισμός ακριβούς ορίου (Point): π.χ. 0 γκολ -> Over 0.5, 1 γκολ -> Over 1.5
+                        target_point = float(current_total_goals) + 0.5
 
                         for m in markets:
                             if m.get("key") == "h2h":
@@ -97,14 +98,17 @@ def get_live_odds_from_odds_api(home_team, away_team):
                             elif m.get("key") == "totals":
                                 outcomes = m.get("outcomes", [])
                                 for out in outcomes:
-                                    if out.get("name") == "Over":
-                                        live_over_odd = float(out.get("price"))
+                                    point = float(out.get("point", 0))
+                                    # ΑΥΣΤΗΡΟΣ ΕΛΕΓΧΟΣ: Μόνο το Over του τρέχοντος ορίου!
+                                    if out.get("name") == "Over" and point == target_point:
+                                        target_over_odd = float(out.get("price"))
 
-                        if home_win_odd and away_win_odd and live_over_odd:
+                        if home_win_odd and away_win_odd and target_over_odd:
                             return {
                                 "home_prematch": home_win_odd,
                                 "away_prematch": away_win_odd,
-                                "live_odd": live_over_odd
+                                "live_odd": target_over_odd,
+                                "target_line": target_point
                             }
     except Exception as e:
         print(f"[-] Σφάλμα λήψης Live Odds: {e}", flush=True)
@@ -119,7 +123,7 @@ def calculate_poisson_ev(home_xg, away_xg, minute, odds):
     time_remaining = max(90 - minute, 1) / 90.0
     total_remaining_xg = (home_xg + away_xg) * time_remaining
 
-    # Πιθανότητα να σημειωθεί τουλάχιστον 1 ακόμα γκολ στον αγώνα
+    # Πιθανότητα να σημειωθεί τουλάχιστον 1 ακόμα γκολ
     prob_scoring_at_least_one = 1 - poisson.pmf(0, total_remaining_xg)
     ev = (prob_scoring_at_least_one * odds) - 1
 
@@ -184,6 +188,7 @@ def analyze_matches(live_matches):
 
             home_goals = score_data.get("home") if score_data.get("home") is not None else 0
             away_goals = score_data.get("away") if score_data.get("away") is not None else 0
+            current_total_goals = home_goals + away_goals
 
             home_xg = float(match.get("home_xg", 1.45))
             away_xg = float(match.get("away_xg", 0.90))
@@ -194,15 +199,16 @@ def analyze_matches(live_matches):
             # -------------------------------------------------------------
             if (10 <= minute <= 75) and (home_goals < away_goals):
 
-                odds_data = get_live_odds_from_odds_api(home_name, away_name)
+                odds_data = get_live_odds_from_odds_api(home_name, away_name, current_total_goals)
 
                 if odds_data and isinstance(odds_data, dict):
                     home_pre = odds_data.get("home_prematch")
                     away_pre = odds_data.get("away_prematch")
                     live_odd = odds_data.get("live_odd")
+                    target_line = odds_data.get("target_line")
 
-                    # ΕΛΕΓΧΟΣ: Η γηπεδούχος πρέπει να είναι ΠΡΑΓΜΑΤΙΚΑ το φαβορί
                     if home_pre and away_pre and live_odd:
+                        # Επιβεβαίωση ότι η Γηπεδούχος ήταν ΠΡΑΓΜΑΤΙ το φαβορί
                         if (home_pre < away_pre) and (home_pre <= 1.65):
                             odds_ratio = live_odd / home_pre
 
@@ -222,7 +228,7 @@ def analyze_matches(live_matches):
                                         f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
                                         f"🎯 **Πίσω στο σκορ:** {home_name} (Γηπεδούχος / Φαβορί)\n"
                                         f"⭐ **Pre-match Odd:** `{home_pre:.2f}` (Φιλοξενούμενη: `{away_pre:.2f}`)\n"
-                                        f"📈 **Live Odd (Market):** `{live_odd:.2f}` (Μεταβολή: `x{odds_ratio:.2f}`)\n"
+                                        f"📈 **Live Odd (Over {target_line}):** `{live_odd:.2f}` (Μεταβολή: `x{odds_ratio:.2f}`)\n"
                                         f"💡 **Expected Value (EV):** `+{round(ev * 100, 1)}%`\n"
                                         f"💵 **Προτεινόμενο Ποντάρισμα:** `{recommended_stake}€`"
                                     )
@@ -235,9 +241,10 @@ def analyze_matches(live_matches):
             # -------------------------------------------------------------
             if (55 <= minute <= 85) and abs(home_goals - away_goals) <= 1:
 
-                odds_data = get_live_odds_from_odds_api(home_name, away_name)
+                odds_data = get_live_odds_from_odds_api(home_name, away_name, current_total_goals)
                 if odds_data and isinstance(odds_data, dict):
                     live_odds = odds_data.get("live_odd")
+                    target_line = odds_data.get("target_line")
 
                     if live_odds:
                         prob, ev, kelly_pct = calculate_poisson_ev(
@@ -255,7 +262,7 @@ def analyze_matches(live_matches):
                                 f"🚨 **VALUE BET ALERT (LATE GOAL)** 🚨\n\n"
                                 f"⚽ **Αγώνας:** {match_name}\n"
                                 f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
-                                f"📈 **Live Odd:** `{live_odds:.2f}`\n"
+                                f"📈 **Live Odd (Over {target_line}):** `{live_odds:.2f}`\n"
                                 f"💡 **Expected Value (EV):** `+{round(ev * 100, 1)}%`\n"
                                 f"💵 **Προτεινόμενο Ποντάρισμα:** `{recommended_stake}€`"
                             )
