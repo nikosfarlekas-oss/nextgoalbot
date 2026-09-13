@@ -35,7 +35,7 @@ sent_alerts = set()  # Λίστα για να μην στέλνει διπλά a
 
 def send_telegram_alert(message):
     if not TELEGRAM_TOKEN:
-        print("[!] Προειδοποίηση: Δεν έχεις βάλει το Telegram Token!")
+        print("[!] Προειδοποίηση: Δεν έχεις βάλει το Telegram Token!", flush=True)
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -55,61 +55,72 @@ def send_telegram_alert(message):
 # 2. ΗΒΡΙΔΙΚΗ ΛΗΨΗ LIVE ODDS (THE ODDS API)
 # ==========================================
 def get_live_odds_from_odds_api(home_team, away_team):
-    """Τραβάει ζωντανές αποδόσεις και pre-match τιμές από το Odds API."""
+    """Τραβάει τις πραγματικές αποδόσεις 1X2 και Over/Under με έξυπνη σύγκριση ονομάτων."""
     if not ODDS_API_KEY:
-        print("[INFO] Δεν βρέθηκε ODDS_API_KEY", flush=True)
-        return {"live_odd": 1.85, "fav_prematch": 1.50}
+        return None
 
     try:
         url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals&live=true"
         res = requests.get(url, timeout=5)
 
-        remaining_requests = res.headers.get("x-requests-remaining", "N/A")
-        print(f"[ODDS API] Requests απομένουν: {remaining_requests}", flush=True)
-
         if res.status_code == 200:
             events = res.json()
-            for event in events:
-                h_name = event.get("home_team", "").lower()
-                a_name = event.get("away_team", "").lower()
 
-                if home_team.lower() in h_name or away_team.lower() in a_name:
+            # Καθαρισμός ονομάτων για καλύτερο matching
+            h_clean = home_team.lower().replace("fc", "").replace("stade", "").strip()
+            a_clean = away_team.lower().replace("fc", "").replace("stade", "").strip()
+
+            for event in events:
+                event_h = event.get("home_team", "").lower()
+                event_a = event.get("away_team", "").lower()
+
+                h_words = [w for w in h_clean.split() if len(w) > 3]
+                match_found = any(w in event_h for w in h_words) if h_words else (h_clean in event_h)
+
+                if match_found:
                     bookmakers = event.get("bookmakers", [])
                     if bookmakers:
                         markets = bookmakers[0].get("markets", [])
-                        live_odd = 1.85
-                        fav_prematch = 1.50
+                        home_win_odd = None
+                        away_win_odd = None
+                        live_over_odd = None
 
                         for m in markets:
-                            # 1X2 Market για pre-match/live φαβορί
                             if m.get("key") == "h2h":
                                 outcomes = m.get("outcomes", [])
                                 for out in outcomes:
                                     if out.get("name") == event.get("home_team"):
-                                        fav_prematch = float(out.get("price", 1.50))
+                                        home_win_odd = float(out.get("price"))
+                                    elif out.get("name") == event.get("away_team"):
+                                        away_win_odd = float(out.get("price"))
 
-                            # Totals Market
                             elif m.get("key") == "totals":
                                 outcomes = m.get("outcomes", [])
                                 for out in outcomes:
                                     if out.get("name") == "Over":
-                                        live_odd = float(out.get("price", 1.85))
+                                        live_over_odd = float(out.get("price"))
 
-                        return {"live_odd": live_odd, "fav_prematch": fav_prematch}
+                        if home_win_odd and away_win_odd and live_over_odd:
+                            return {
+                                "home_prematch": home_win_odd,
+                                "away_prematch": away_win_odd,
+                                "live_odd": live_over_odd
+                            }
     except Exception as e:
         print(f"[-] Σφάλμα λήψης Live Odds: {e}", flush=True)
 
-    return {"live_odd": 1.85, "fav_prematch": 1.50}
+    return None
 
 
 # ==========================================
 # 3. ΜΑΘΗΜΑΤΙΚΟ ΜΟΝΤΕΛΟ POISSON & KELLY
 # ==========================================
-def calculate_poisson_ev(home_xg, away_xg, minute, current_home_goals, odds):
+def calculate_poisson_ev(home_xg, away_xg, minute, odds):
     time_remaining = max(90 - minute, 1) / 90.0
-    remaining_home_xg = home_xg * time_remaining
+    total_remaining_xg = (home_xg + away_xg) * time_remaining
 
-    prob_scoring_at_least_one = 1 - poisson.pmf(0, remaining_home_xg)
+    # Πιθανότητα να σημειωθεί τουλάχιστον 1 ακόμα γκολ στον αγώνα
+    prob_scoring_at_least_one = 1 - poisson.pmf(0, total_remaining_xg)
     ev = (prob_scoring_at_least_one * odds) - 1
 
     b = odds - 1
@@ -167,11 +178,7 @@ def analyze_matches(live_matches):
                 start_time = datetime.fromisoformat(match_utc_str.replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
                 elapsed = int((now - start_time).total_seconds() / 60)
-
-                if elapsed <= 50:
-                    minute = elapsed
-                else:
-                    minute = min(elapsed - 15, 90)
+                minute = elapsed if elapsed <= 50 else min(elapsed - 15, 90)
             else:
                 minute = 50
 
@@ -189,37 +196,39 @@ def analyze_matches(live_matches):
 
                 odds_data = get_live_odds_from_odds_api(home_name, away_name)
 
-                if isinstance(odds_data, dict):
-                    fav_pre = odds_data.get("fav_prematch", 1.50)
-                    live_odd = odds_data.get("live_odd", 1.85)
+                if odds_data and isinstance(odds_data, dict):
+                    home_pre = odds_data.get("home_prematch")
+                    away_pre = odds_data.get("away_prematch")
+                    live_odd = odds_data.get("live_odd")
 
-                    if fav_pre <= 1.65:
-                        odds_ratio = live_odd / fav_pre
+                    # ΕΛΕΓΧΟΣ: Η γηπεδούχος πρέπει να είναι ΠΡΑΓΜΑΤΙΚΑ το φαβορί
+                    if home_pre and away_pre and live_odd:
+                        if (home_pre < away_pre) and (home_pre <= 1.65):
+                            odds_ratio = live_odd / home_pre
 
-                        if 1.20 <= odds_ratio <= 2.60:
-                            prob, ev, kelly_pct = calculate_poisson_ev(
-                                home_xg=home_xg,
-                                away_xg=away_xg,
-                                minute=minute,
-                                current_home_goals=home_goals,
-                                odds=live_odd
-                            )
-
-                            if ev > 0.035:  # EV > +3.5%
-                                recommended_stake = round(bankroll * kelly_pct, 2)
-                                msg = (
-                                    f"🔥 **HOME FAVORITE RECOVERY ALERT** 🔥\n\n"
-                                    f"⚽ **Αγώνας:** {match_name}\n"
-                                    f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
-                                    f"🎯 **Πίσω στο σκορ:** {home_name} (Γηπεδούχος / Φαβορί)\n"
-                                    f"⭐ **Pre-match Odd:** `{fav_pre:.2f}`\n"
-                                    f"📈 **Live Odd (Market):** `{live_odd:.2f}` (Μεταβολή: `x{odds_ratio:.2f}`)\n"
-                                    f"💡 **Expected Value (EV):** `+{round(ev * 100, 1)}%`\n"
-                                    f"💵 **Προτεινόμενο Ποντάρισμα:** `{recommended_stake}€`"
+                            if 1.20 <= odds_ratio <= 2.60:
+                                prob, ev, kelly_pct = calculate_poisson_ev(
+                                    home_xg=home_xg,
+                                    away_xg=away_xg,
+                                    minute=minute,
+                                    odds=live_odd
                                 )
-                                send_telegram_alert(msg)
-                                sent_alerts.add(match_id)
-                                continue
+
+                                if ev > 0.035:
+                                    recommended_stake = round(bankroll * kelly_pct, 2)
+                                    msg = (
+                                        f"🔥 **HOME FAVORITE RECOVERY ALERT** 🔥\n\n"
+                                        f"⚽ **Αγώνας:** {match_name}\n"
+                                        f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
+                                        f"🎯 **Πίσω στο σκορ:** {home_name} (Γηπεδούχος / Φαβορί)\n"
+                                        f"⭐ **Pre-match Odd:** `{home_pre:.2f}` (Φιλοξενούμενη: `{away_pre:.2f}`)\n"
+                                        f"📈 **Live Odd (Market):** `{live_odd:.2f}` (Μεταβολή: `x{odds_ratio:.2f}`)\n"
+                                        f"💡 **Expected Value (EV):** `+{round(ev * 100, 1)}%`\n"
+                                        f"💵 **Προτεινόμενο Ποντάρισμα:** `{recommended_stake}€`"
+                                    )
+                                    send_telegram_alert(msg)
+                                    sent_alerts.add(match_id)
+                                    continue
 
             # -------------------------------------------------------------
             # ΣΕΝΑΡΙΟ 2: Dynamic Poisson EV (55'-85' & Score Diff <= 1)
@@ -227,30 +236,31 @@ def analyze_matches(live_matches):
             if (55 <= minute <= 85) and abs(home_goals - away_goals) <= 1:
 
                 odds_data = get_live_odds_from_odds_api(home_name, away_name)
-                live_odds = odds_data.get("live_odd", 1.85) if isinstance(odds_data, dict) else 1.85
+                if odds_data and isinstance(odds_data, dict):
+                    live_odds = odds_data.get("live_odd")
 
-                prob, ev, kelly_pct = calculate_poisson_ev(
-                    home_xg=home_xg,
-                    away_xg=away_xg,
-                    minute=minute,
-                    current_home_goals=home_goals,
-                    odds=live_odds
-                )
+                    if live_odds:
+                        prob, ev, kelly_pct = calculate_poisson_ev(
+                            home_xg=home_xg,
+                            away_xg=away_xg,
+                            minute=minute,
+                            odds=live_odds
+                        )
 
-                total_xg = home_xg + away_xg
+                        total_xg = home_xg + away_xg
 
-                if ev > 0.035 and total_xg >= 1.20:
-                    recommended_stake = round(bankroll * kelly_pct, 2)
-                    msg = (
-                        f"🚨 **VALUE BET ALERT (LATE GOAL)** 🚨\n\n"
-                        f"⚽ **Αγώνας:** {match_name}\n"
-                        f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
-                        f"📈 **Live Odd:** `{live_odds:.2f}`\n"
-                        f"💡 **Expected Value (EV):** `+{round(ev * 100, 1)}%`\n"
-                        f"💵 **Προτεινόμενο Ποντάρισμα:** `{recommended_stake}€`"
-                    )
-                    send_telegram_alert(msg)
-                    sent_alerts.add(match_id)
+                        if ev > 0.035 and total_xg >= 1.20:
+                            recommended_stake = round(bankroll * kelly_pct, 2)
+                            msg = (
+                                f"🚨 **VALUE BET ALERT (LATE GOAL)** 🚨\n\n"
+                                f"⚽ **Αγώνας:** {match_name}\n"
+                                f"📊 **Σκορ:** {home_goals}-{away_goals} ({minute}')\n"
+                                f"📈 **Live Odd:** `{live_odds:.2f}`\n"
+                                f"💡 **Expected Value (EV):** `+{round(ev * 100, 1)}%`\n"
+                                f"💵 **Προτεινόμενο Ποντάρισμα:** `{recommended_stake}€`"
+                            )
+                            send_telegram_alert(msg)
+                            sent_alerts.add(match_id)
 
 
 def run_bot():
