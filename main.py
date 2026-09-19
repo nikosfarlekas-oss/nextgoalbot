@@ -57,6 +57,42 @@ CREDIT_COST_EVENTS_CALL = 2
 CREDIT_COST_TEAM_TOTALS_CALL = 1
 ODDS_429_BACKOFF_SECONDS = int(os.getenv("ODDS_429_BACKOFF_SECONDS", str(6 * 60 * 60)))
 
+# --- Highlightly (live match stats: shots on target, corners, etc.) ---
+#
+# NOTE ON RELIABILITY: this integration is built from Highlightly's
+# public SDK/docs references, NOT a verified live response sample -
+# I could not call the real API from here. The base URL and auth
+# header below are correct per their official Go client, but the
+# exact statistics endpoint path and JSON field names may need a
+# small adjustment once you have a key and can inspect a real
+# response. See get_live_match_stats_cached() and
+# compute_tempo_factor() - both are isolated so a schema tweak only
+# touches those two functions, nothing else in the bot.
+HIGHLIGHTLY_API_KEY = os.getenv("HIGHLIGHTLY_API_KEY")
+HIGHLIGHTLY_BASE_URL = os.getenv("HIGHLIGHTLY_BASE_URL", "https://sports.highlightly.net/football")
+
+# Free tier is 100 requests/day - keep a safety margin under that.
+HIGHLIGHTLY_DAILY_REQUEST_BUDGET = int(os.getenv("HIGHLIGHTLY_DAILY_REQUEST_BUDGET", "90"))
+
+# Live stats change fast, but we still don't want to hit the API on
+# every single poll cycle for the same match.
+HIGHLIGHTLY_STATS_CACHE_SECONDS = int(os.getenv("HIGHLIGHTLY_STATS_CACHE_SECONDS", str(3 * 60)))
+
+# Rough heuristic baseline: combined shots-on-target per 90 minutes
+# for an "average pace" match. Used only to scale live xG up/down -
+# tune this per league if you like, it's not a precise figure.
+LEAGUE_AVG_SOT_PER_90 = float(os.getenv("LEAGUE_AVG_SOT_PER_90", "8.5"))
+
+# Hard clamp so a small-sample noise spike (e.g. 3 shots in the
+# first 5 minutes) can't wildly distort the xG estimate.
+TEMPO_ADJUSTMENT_MIN = float(os.getenv("TEMPO_ADJUSTMENT_MIN", "0.6"))
+TEMPO_ADJUSTMENT_MAX = float(os.getenv("TEMPO_ADJUSTMENT_MAX", "1.6"))
+
+_highlightly_usage = {"date": None, "used": 0}
+_highlightly_lock = threading.Lock()
+_highlightly_rate_limited_until = 0.0
+_highlightly_stats_cache = {}  # key -> {"data": ..., "fetched_at": ...}
+
 PREMATCH_WARM_SECONDS = int(os.getenv("PREMATCH_WARM_SECONDS", str(30 * 60)))
 PREMATCH_CACHE_FILE = os.getenv("PREMATCH_CACHE_FILE", "prematch_cache.json")
 _last_prematch_warm = 0.0
@@ -641,6 +677,149 @@ def get_team_total_odds_cached(event_id, sport_key, team_name, target_point):
     return data
 
 
+# =========================================================
+# HIGHLIGHTLY - LIVE MATCH STATS (tempo adjustment for Over)
+# =========================================================
+
+def try_consume_highlightly_request(cost=1):
+    with _highlightly_lock:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if _highlightly_usage["date"] != today:
+            _highlightly_usage["date"] = today
+            _highlightly_usage["used"] = 0
+        if _highlightly_usage["used"] + cost > HIGHLIGHTLY_DAILY_REQUEST_BUDGET:
+            return False
+        _highlightly_usage["used"] += cost
+        return True
+
+
+def highlightly_api_request(path, params=None):
+    global _highlightly_rate_limited_until
+    if not HIGHLIGHTLY_API_KEY:
+        return None
+    if time.monotonic() < _highlightly_rate_limited_until:
+        return None
+    headers = {"x-rapidapi-key": HIGHLIGHTLY_API_KEY}
+    url = f"{HIGHLIGHTLY_BASE_URL}{path}"
+    try:
+        response = requests.get(url, headers=headers, params=params or {}, timeout=10)
+        if response.status_code == 429:
+            _highlightly_rate_limited_until = time.monotonic() + 6 * 60 * 60
+            print("[!] Highlightly 429 - backing off 6h.", flush=True)
+            return None
+        if not response.ok:
+            print(f"[-] Highlightly API {response.status_code}: {response.text[:300]}", flush=True)
+            return None
+        return response.json()
+    except requests.RequestException as exc:
+        print(f"[-] Highlightly request error: {exc}", flush=True)
+    except ValueError:
+        print("[-] Invalid JSON from Highlightly.", flush=True)
+    return None
+
+
+def find_highlightly_match_id(home_name, away_name):
+    """
+    NOTE: the /matches query parameters (date filter, live-only
+    filter, response shape) are NOT verified against a live
+    response - adjust the params/parsing below once you can inspect
+    the real payload against https://highlightly.net/documentation/football/.
+    """
+    data = highlightly_api_request("/matches", {
+        "date": datetime.now(timezone.utc).date().isoformat(),
+    })
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        data = data["data"]
+    if not isinstance(data, list):
+        return None
+    for entry in data:
+        home = (
+            entry.get("homeTeam", {}).get("name")
+            if isinstance(entry.get("homeTeam"), dict)
+            else entry.get("home_team")
+        )
+        away = (
+            entry.get("awayTeam", {}).get("name")
+            if isinstance(entry.get("awayTeam"), dict)
+            else entry.get("away_team")
+        )
+        if teams_match(home_name, away_name, home, away):
+            return entry.get("id")
+    return None
+
+
+def get_live_match_stats_cached(home_name, away_name):
+    """
+    Cached, budgeted fetch of live match statistics for a fixture,
+    matched by team name. Returns whatever the raw API gives back
+    (shape NOT fully verified - see compute_tempo_factor() for how
+    it's consumed defensively).
+    """
+    if not HIGHLIGHTLY_API_KEY:
+        return None
+
+    key = f"{normalize_team_name(home_name)}:{normalize_team_name(away_name)}"
+    now = time.monotonic()
+    cached = _highlightly_stats_cache.get(key)
+    if cached and (now - cached["fetched_at"]) < HIGHLIGHTLY_STATS_CACHE_SECONDS:
+        return cached["data"]
+
+    if not try_consume_highlightly_request(1):
+        print("[!] Highlightly daily budget reached - skipping live stats.", flush=True)
+        return cached["data"] if cached else None
+
+    match_id = find_highlightly_match_id(home_name, away_name)
+    if not match_id:
+        _highlightly_stats_cache[key] = {"data": None, "fetched_at": now}
+        return None
+
+    if not try_consume_highlightly_request(1):
+        _highlightly_stats_cache[key] = {"data": None, "fetched_at": now}
+        return None
+
+    # NOTE: endpoint path/shape not verified live - adjust here if needed.
+    stats = highlightly_api_request(f"/matches/{match_id}/statistics")
+    _highlightly_stats_cache[key] = {"data": stats, "fetched_at": now}
+    return stats
+
+
+def compute_tempo_factor(stats, minute):
+    """
+    Rough heuristic: compares combined shots-on-target so far to a
+    league-average pace for this point in the match, to scale the
+    remaining-time xG up (busier than average game) or down
+    (quieter than average game). Returns 1.0 (neutral, no
+    adjustment) whenever the stats are missing, malformed, or the
+    expected fields simply aren't present - tempo adjustment should
+    never be able to crash the alert logic OR mistake "field not
+    present" for "confirmed zero shots" (a real quiet 0-0 game and
+    a broken/incomplete API response must not be treated the same).
+    """
+    if not isinstance(stats, dict) or minute <= 0:
+        return 1.0
+
+    home_block = stats.get("home") or stats.get("homeTeam")
+    away_block = stats.get("away") or stats.get("awayTeam")
+    if not isinstance(home_block, dict) or not isinstance(away_block, dict):
+        return 1.0
+
+    home_present = "shots_on_target" in home_block or "shotsOnTarget" in home_block
+    away_present = "shots_on_target" in away_block or "shotsOnTarget" in away_block
+    if not (home_present and away_present):
+        return 1.0
+
+    home_sot = safe_float(home_block.get("shots_on_target", home_block.get("shotsOnTarget"))) or 0.0
+    away_sot = safe_float(away_block.get("shots_on_target", away_block.get("shotsOnTarget"))) or 0.0
+
+    combined_sot = home_sot + away_sot
+    expected_sot_by_now = LEAGUE_AVG_SOT_PER_90 * (minute / 90.0)
+    if expected_sot_by_now <= 0:
+        return 1.0
+
+    factor = combined_sot / expected_sot_by_now
+    return max(TEMPO_ADJUSTMENT_MIN, min(TEMPO_ADJUSTMENT_MAX, factor))
+
+
 def state_has_opportunity(state):
     minute = state["minute"]
     over_window = 20 <= minute <= 82
@@ -710,11 +889,25 @@ def process_single_match(state, odds_events):
             if over_data:
                 live_odd = over_data["odd"]
                 target_line = over_data["point"]
-                total_xg = (home_xg + away_xg) * time_remaining
+
+                # Live tempo adjustment (optional - only if a
+                # Highlightly key is configured). Scales the base
+                # xG up/down based on actual shots-on-target so far
+                # vs a league-average pace, instead of relying
+                # purely on the static pre-match xG estimate.
+                tempo_factor = 1.0
+                if HIGHLIGHTLY_API_KEY:
+                    live_stats = get_live_match_stats_cached(home_name, away_name)
+                    tempo_factor = compute_tempo_factor(live_stats, minute)
+
+                total_xg = (home_xg + away_xg) * time_remaining * tempo_factor
                 prob_over = poisson_probability_at_least_one(total_xg)
                 ev_over = calculate_ev(prob_over, live_odd)
                 if ev_over is not None and ev_over >= MIN_EV_OVER and (home_xg + away_xg) >= 1.20:
                     stake = calculate_quarter_kelly(prob_over, live_odd)
+                    tempo_line = (
+                        f"🏃 Tempo: {tempo_factor:.2f}x\n" if HIGHLIGHTLY_API_KEY else ""
+                    )
                     msg = (
                         "🚨 VALUE BET ALERT 🚨\n\n"
                         f"⚽ Αγώνας: {match_name}\n"
@@ -722,6 +915,7 @@ def process_single_match(state, odds_events):
                         f"🎯 Market: Over {target_line:.1f}\n"
                         f"📈 Live Odd: {live_odd:.2f}\n"
                         f"🧮 Model probability: {prob_over * 100:.1f}%\n"
+                        f"{tempo_line}"
                         f"💡 EV: +{ev_over * 100:.1f}%\n"
                         f"💵 Quarter-Kelly stake: {stake:.2f}€\n"
                         f"🏦 Bookmaker: {over_data['bookmaker']}"
