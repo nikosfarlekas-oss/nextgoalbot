@@ -91,7 +91,7 @@ ODDS_429_BACKOFF_SECONDS = int(os.getenv("ODDS_429_BACKOFF_SECONDS", str(6 * 60 
 # legitimate reasons to run at any hour (settling a match that
 # finished after the window closed; warming odds for a fixture that
 # kicks off before the window opens).
-ACTIVE_HOURS_WEEKDAY = os.getenv("ACTIVE_HOURS_WEEKDAY", "18:00-23:59")
+ACTIVE_HOURS_WEEKDAY = os.getenv("ACTIVE_HOURS_WEEKDAY", "19:00-23:59")
 ACTIVE_HOURS_WEEKEND = os.getenv("ACTIVE_HOURS_WEEKEND", "13:00-23:59")
 IDLE_CHECK_SECONDS = int(os.getenv("IDLE_CHECK_SECONDS", str(15 * 60)))
 
@@ -125,6 +125,38 @@ def is_within_active_hours(now_local=None):
     if start <= end:
         return start <= current <= end
     return current >= start or current <= end
+
+
+# How many hours before the active window opens prematch warming is
+# allowed to start. Without this, warming runs 24/7 on its own
+# PREMATCH_WARM_SECONDS timer regardless of active hours (by design
+# - a fixture can kick off before the window opens) - but that also
+# meant it could burn the ENTIRE daily credit budget overnight/
+# mid-morning on background warming alone, leaving nothing for real
+# live alerts once the window actually opens in the evening. This
+# caps warming to a sensible band around the window instead of all
+# day.
+PREMATCH_WARM_LOOKAHEAD_HOURS = float(os.getenv("PREMATCH_WARM_LOOKAHEAD_HOURS", "2"))
+
+
+def is_within_prematch_warm_period(now_local=None):
+    if now_local is None:
+        now_local = datetime.now(_tzinfo)
+    is_weekend = now_local.weekday() >= 5
+    window_str = ACTIVE_HOURS_WEEKEND if is_weekend else ACTIVE_HOURS_WEEKDAY
+    window = _parse_time_window(window_str)
+    if window is None:
+        return True  # fail open
+
+    start, end = window
+    today = now_local.date()
+    start_dt = datetime.combine(today, start, tzinfo=now_local.tzinfo)
+    end_dt = datetime.combine(today, end, tzinfo=now_local.tzinfo)
+    if end <= start:
+        end_dt += timedelta(days=1)
+
+    warm_start_dt = start_dt - timedelta(hours=PREMATCH_WARM_LOOKAHEAD_HOURS)
+    return warm_start_dt <= now_local <= end_dt
 
 # --- Highlightly (live match stats: shots on target, corners, etc.) ---
 #
@@ -162,7 +194,7 @@ _highlightly_lock = threading.Lock()
 _highlightly_rate_limited_until = 0.0
 _highlightly_stats_cache = {}  # key -> {"data": ..., "fetched_at": ...}
 
-PREMATCH_WARM_SECONDS = int(os.getenv("PREMATCH_WARM_SECONDS", str(30 * 60)))
+PREMATCH_WARM_SECONDS = int(os.getenv("PREMATCH_WARM_SECONDS", str(2 * 60 * 60)))  # 2h - see note above
 PREMATCH_CACHE_FILE = os.getenv("PREMATCH_CACHE_FILE", "prematch_cache.json")
 _last_prematch_warm = 0.0
 
@@ -677,6 +709,10 @@ def update_prematch_cache(events):
 
 def warm_prematch_cache_if_due():
     global _last_prematch_warm
+
+    if not is_within_prematch_warm_period():
+        return
+
     now = time.monotonic()
     if now - _last_prematch_warm < PREMATCH_WARM_SECONDS:
         return
